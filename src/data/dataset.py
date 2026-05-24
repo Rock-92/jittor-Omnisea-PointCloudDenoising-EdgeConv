@@ -219,9 +219,14 @@ class PCDataset(Dataset):
 
         def to_numpy(x, key: str):
             if isinstance(x, ndarray):
+                if np.issubdtype(x.dtype, np.floating):
+                    return x.astype(np.float32, copy=False)
                 return x
             if isinstance(x, jt.Var):
-                return x.detach().numpy()
+                x = x.detach().numpy()
+                if np.issubdtype(x.dtype, np.floating):
+                    return x.astype(np.float32, copy=False)
+                return x
             raise ValueError(f"cannot collate type of key {key}, type: {type(x)}")
         
         for k, v in processed_batch[0].items():
