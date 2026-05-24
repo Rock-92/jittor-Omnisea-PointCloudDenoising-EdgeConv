@@ -82,7 +82,7 @@ class DummySystem():
         self._validation_scores = []
         self._validation_score_errors = []
         self._validation_score_summary = None
-        self.best_score = None
+        self.best_loss = None
         self.best_epoch = None
         self.current_epoch = 0
     
@@ -149,6 +149,15 @@ class DummySystem():
         pass
     
     def on_validation_epoch_end(self):
+        loss_summary = self._get_validation_loss_summary()
+        if loss_summary is not None:
+            print(
+                f"Epoch {self.current_epoch}, Validate Loss: "
+                f"loss_sum={loss_summary['loss_sum']:.8f}, "
+                f"samples={loss_summary['num_samples']}"
+            )
+            self._save_best_checkpoint(loss_summary)
+
         if not self._should_log_score():
             return
         summary = aggregate_denoising_scores(self._validation_scores)
@@ -177,19 +186,30 @@ class DummySystem():
                 f"Epoch {self.current_epoch}, Validate Score warnings: "
                 f"{len(self._validation_score_errors)} samples skipped"
             )
-        self._save_best_checkpoint(summary)
     
     def on_before_optimizer_step(self, optimizer):
         pass
 
+    def _get_validation_loss_summary(self):
+        losses = []
+        for key, values in self._validation_loss.items():
+            if key.endswith("_loss_sum"):
+                losses.extend(values)
+        if not losses:
+            return None
+        return {
+            "loss_sum": float(np.mean(losses)),
+            "num_samples": len(losses),
+        }
+
     def _save_best_checkpoint(self, summary):
-        score = summary.get('final_score', None)
-        if score is None:
+        loss = summary.get('loss_sum', None)
+        if loss is None:
             return
-        if self.best_score is not None and score <= self.best_score:
+        if self.best_loss is not None and loss >= self.best_loss:
             return
 
-        self.best_score = score
+        self.best_loss = loss
         self.best_epoch = self.current_epoch
         os.makedirs(self.ckpt_save_dir, exist_ok=True)
 
@@ -199,23 +219,15 @@ class DummySystem():
         meta_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_best.txt')
         with open(meta_path, "w", encoding="utf-8") as f:
             f.write(f"best_epoch: {self.best_epoch}\n")
-            f.write(f"best_score: {self.best_score:.8f}\n")
-            for key in [
-                "cd_score",
-                "cd_pred",
-                "cd_noisy",
-                "p2s_score",
-                "p2s_pred",
-                "p2s_noisy",
-                "num_samples",
-            ]:
+            f.write(f"best_loss: {self.best_loss:.8f}\n")
+            for key in ["loss_sum", "num_samples"]:
                 value = summary.get(key, None)
                 if value is not None:
                     f.write(f"{key}: {value}\n")
 
         print(
             f"Epoch {self.current_epoch}, Best checkpoint saved: "
-            f"{best_path} (score={self.best_score:.4f})"
+            f"{best_path} (loss={self.best_loss:.8f})"
         )
 
     def _should_log_score(self):

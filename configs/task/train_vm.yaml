@@ -17,7 +17,7 @@ optimizer:
 trainer:
   epochs: 100
   log_score: True
-  score_every_n_epochs: 1
+  score_every_n_epochs: 10
   score_max_samples: 0
   create_submission_on_train_end: True
   submission_use_best: True

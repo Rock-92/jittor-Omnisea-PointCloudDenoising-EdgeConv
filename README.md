@@ -86,13 +86,13 @@ python scripts/train.py --config configs/task/train_vm.yaml --seed 123
 python run.py --task configs/task/train_vm.yaml --seed 123
 ```
 
-训练配置默认会在每个 epoch 结束后基于验证集输出榜单式
+训练配置默认会在每 10 个 epoch 结束后基于验证集输出榜单式
 `final_score`、`cd_score` 和 `p2s_score`。相关开关在
 [configs/task/train_vm.yaml](configs/task/train_vm.yaml) 的 `trainer`
 字段中，包括 `log_score`、`score_every_n_epochs` 和 `score_max_samples`。
-当验证集 `final_score` 刷新最高值时，会额外保存
+每个 epoch 都会根据验证集 `loss_sum` 保存 best，loss 更低时会额外保存
 `outputs/experiments/vm/checkpoint_best.pkl`，并写入
-`outputs/experiments/vm/checkpoint_best.txt` 记录 best epoch 和分数。
+`outputs/experiments/vm/checkpoint_best.txt` 记录 best epoch 和 loss。
 训练结束后默认会加载 `checkpoint_best.pkl` 在 `test_noisy/` 上推理，
 并自动生成提交包 `outputs/result.zip`。如果只想训练不打包，可以在
 [configs/task/train_vm.yaml](configs/task/train_vm.yaml) 中将
