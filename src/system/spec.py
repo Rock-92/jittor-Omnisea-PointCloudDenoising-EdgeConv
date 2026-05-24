@@ -18,6 +18,19 @@ def _get_item(x):
         return x.item()
     return x
 
+def _to_jittor(value):
+    if isinstance(value, np.ndarray):
+        return jt.array(value)
+    if isinstance(value, jt.Var):
+        return value
+    if isinstance(value, dict):
+        return {k: _to_jittor(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_to_jittor(v) for v in value)
+    if isinstance(value, list):
+        return [_to_jittor(v) for v in value]
+    return value
+
 def get_optimizer(optimizer_config, model):
     __target__ = optimizer_config.pop('__target__')
     MAPPING = {
@@ -189,6 +202,9 @@ class DummySystem():
     
     def on_before_optimizer_step(self, optimizer):
         pass
+
+    def prepare_batch(self, batch):
+        return _to_jittor(batch)
 
     def _get_validation_loss_summary(self):
         losses = []
@@ -372,6 +388,7 @@ class DummySystem():
             assert train_dataloader is not None, "train_dataloader is None"
             pbar = tqdm(train_dataloader, total=len(train_dataloader)//train_dataloader.batch_size) # type: ignore
             for batch in pbar:
+                batch = self.prepare_batch(batch)
                 self.on_train_batch_start()
                 loss = self.training_step(batch)
                 self.optimizer.zero_grad()
@@ -390,6 +407,7 @@ class DummySystem():
                     for name, dataloader in validate_dataloader.items():
                         pbar = tqdm(dataloader, total=len(dataloader)//dataloader.batch_size)
                         for batch in pbar:
+                            batch = self.prepare_batch(batch)
                             self.on_validation_batch_start()
                             loss = self.validation_step(batch)
                             pbar.set_description(f"Epoch {epoch}, Validate {name}, Loss: {_get_item(loss)}")
@@ -397,6 +415,7 @@ class DummySystem():
                 else:
                     pbar = tqdm(validate_dataloader, total=len(validate_dataloader)//validate_dataloader.batch_size)
                     for batch in pbar:
+                        batch = self.prepare_batch(batch)
                         self.on_validation_batch_start()
                         loss = self.validation_step(batch)
                         pbar.set_description(f"Epoch {epoch}, Validate, Loss: {_get_item(loss)}")
@@ -420,6 +439,7 @@ class DummySystem():
         for dataloader_name, dataloader in predict_dataloader.items():
             pbar = tqdm(dataloader, total=len(dataloader)//dataloader.batch_size) # type: ignore
             for batch_idx, batch in enumerate(pbar):
+                batch = self.prepare_batch(batch)
                 self.on_predict_batch_start()
                 output = self.predict_step(batch, batch_idx)
                 if self.writer is not None:

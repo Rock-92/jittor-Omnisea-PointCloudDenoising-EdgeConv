@@ -24,11 +24,14 @@ class DatasetConfig(ConfigSpec):
     
     @classmethod
     def parse(cls, **kwargs) -> 'DatasetConfig':
-        cls.check_keys(kwargs)
+        cls.check_keys(
+            kwargs,
+            expect=["shuffle", "batch_size", "num_workers", "numworker", "datapath"],
+        )
         return DatasetConfig(
             shuffle=kwargs.get('shuffle', False),
             batch_size=kwargs.get('batch_size', 1),
-            num_workers=kwargs.get('num_workers', 0),
+            num_workers=kwargs.get('num_workers', kwargs.get('numworker', 0)),
             datapath=Datapath.parse(**kwargs.get('datapath')), # type: ignore
         )
     
@@ -206,29 +209,30 @@ class PCDataset(Dataset):
         processed_batch = self.process_fn(batch) # type: ignore
         processed_batch: List[Dict]
         
-        tensors_stack = {}
-        tensors_cat = {}
+        arrays_stack = {}
+        arrays_cat = {}
         non_tensors = {}
         vis = {}
         def check(x):
             assert x not in vis, f"multiple keys found: {x}"
             vis[x] = True
+
+        def to_numpy(x, key: str):
+            if isinstance(x, ndarray):
+                return x
+            if isinstance(x, jt.Var):
+                return x.detach().numpy()
+            raise ValueError(f"cannot collate type of key {key}, type: {type(x)}")
         
         for k, v in processed_batch[0].items():
             if k == "cat":
                 assert isinstance(v, dict)
                 for k1 in v.keys():
                     check(k1)
-                    tensors_cat[k1] = []
+                    arrays_cat[k1] = []
                     for i in range(len(processed_batch)):
                         v1 = processed_batch[i]['cat'][k1]
-                        if isinstance(v1, ndarray):
-                            v1 = jt.array(v1)
-                        elif isinstance(v1, jt.Var):
-                            v1 = v1
-                        else:
-                            raise ValueError(f"cannot concatenate non-tensor type of key {k1}, type: {type(v1)}")
-                        tensors_cat[k1].append(v1)
+                        arrays_cat[k1].append(to_numpy(v1, k1))
             elif k == "non":
                 assert isinstance(v, dict)
                 for k1 in v.keys():
@@ -236,24 +240,16 @@ class PCDataset(Dataset):
                     non_tensors[k1] = []
                     for i in range(len(processed_batch)):
                         v1 = processed_batch[i]['non'][k1]
-                        if isinstance(v1, ndarray):
-                            v1 = jt.array(v1)
                         non_tensors[k1].append(v1)
             else:
                 check(k)
-                tensors_stack[k] = []
+                arrays_stack[k] = []
                 for i in range(len(processed_batch)):
                     v1 = processed_batch[i][k]
-                    if isinstance(v1, ndarray):
-                        v1 = jt.array(v1)
-                    elif isinstance(v1, jt.Var):
-                        v1 = v1
-                    else:
-                        raise ValueError(f"cannot stack type of key {k}, type: {type(v1)}")
-                    tensors_stack[k].append(v1)
+                    arrays_stack[k].append(to_numpy(v1, k))
         
-        collated_stack = {k: jt.stack(v) for k, v in tensors_stack.items()}
-        collated_cat = {k: jt.concat(v, dim=1) for k, v in tensors_cat.items()}
+        collated_stack = {k: np.stack(v, axis=0) for k, v in arrays_stack.items()}
+        collated_cat = {k: np.concatenate(v, axis=1) for k, v in arrays_cat.items()}
         
         collated_batch = {
             **collated_stack,
