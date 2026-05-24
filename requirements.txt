@@ -1,0 +1,12 @@
+# Generated from the local conda env: jittor
+# Python: 3.9.25
+
+jittor==1.3.8.5
+numpy==1.23.5
+scipy==1.13.1
+trimesh==4.12.2
+omegaconf==2.3.0
+tqdm==4.67.3
+
+# Optional: install for exact mesh-based P2S evaluation if available.
+# point-cloud-utils

@@ -1,0 +1,10 @@
+# Notice
+
+This baseline references the method design of:
+
+Dasith de Silva Edirimuni, Xuequan Lu, Gang Li, Lei Wei, Antonio Robles-Kelly,
+Hongdong Li. StraightPCF: Straight Point Cloud Filtering. CVPR 2024,
+pp. 20721-20730.
+
+Before public release, verify whether any upstream starter-code license or
+competition-specific notice must be preserved.
