@@ -21,6 +21,8 @@ trainer:
   score_every_n_epochs: 1
   score_max_samples: 0
   training_log_path: outputs/training_log.csv
+  lr_decay_patience: 10
+  lr_decay_factor: 0.8
   create_submission_on_train_end: True
   submission_use_best: True
   submission_source_dir: outputs/submission

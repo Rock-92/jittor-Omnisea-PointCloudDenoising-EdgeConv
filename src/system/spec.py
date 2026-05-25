@@ -91,6 +91,9 @@ class DummySystem():
         self.training_log_path = trainer_config.get(
             'training_log_path', os.path.join('outputs', 'training_log.csv')
         )
+        self.lr_decay_patience = trainer_config.get('lr_decay_patience', 10)
+        self.lr_decay_factor = trainer_config.get('lr_decay_factor', 0.8)
+        self.lr_decay_min = trainer_config.get('lr_decay_min', 0.0)
         
         if optimizer_config is not None and model is not None:
             self.optimizer = get_optimizer(optimizer_config, model)
@@ -103,6 +106,9 @@ class DummySystem():
         self._validation_score_errors = []
         self._validation_score_summary = None
         self._last_train_loss_dict = {}
+        self._best_checkpoint_updated = False
+        self._epochs_since_best_checkpoint = 0
+        self._last_lr_decayed = False
         self.best_loss = None
         self.best_score = None
         self.best_epoch = None
@@ -141,6 +147,8 @@ class DummySystem():
     def on_train_epoch_start(self):
         self._train_loss = defaultdict(list)
         self._last_train_loss_dict = {}
+        self._best_checkpoint_updated = False
+        self._last_lr_decayed = False
     
     def on_train_batch_start(self):
         pass
@@ -290,6 +298,9 @@ class DummySystem():
             "validation_score_errors",
             "best_epoch",
             "best_score",
+            "current_lr",
+            "epochs_since_best_checkpoint",
+            "lr_decayed",
             "checkpoint_path",
         ]
 
@@ -325,6 +336,10 @@ class DummySystem():
         row["validation_score_errors"] = len(self._validation_score_errors)
         row["best_epoch"] = "" if self.best_epoch is None else self.best_epoch
         row["best_score"] = "" if self.best_score is None else self.best_score
+        current_lr = self._get_optimizer_lr()
+        row["current_lr"] = "" if current_lr is None else current_lr
+        row["epochs_since_best_checkpoint"] = self._epochs_since_best_checkpoint
+        row["lr_decayed"] = int(self._last_lr_decayed)
         row["checkpoint_path"] = checkpoint_path
 
         log_path = os.path.abspath(self.training_log_path)
@@ -337,15 +352,60 @@ class DummySystem():
             writer.writerow(row)
         print(f"Epoch {epoch}, Training log updated: {log_path}")
 
+    def _get_optimizer_lr(self):
+        if self.optimizer is None:
+            return None
+        lr = getattr(self.optimizer, "lr", None)
+        if lr is None:
+            return None
+        return float(_get_item(lr))
+
+    def _set_optimizer_lr(self, lr):
+        if self.optimizer is None:
+            return
+        if hasattr(self.optimizer, "lr"):
+            self.optimizer.lr = lr
+        for group in getattr(self.optimizer, "param_groups", []):
+            if isinstance(group, dict) and "lr" in group:
+                group["lr"] = lr
+
+    def _update_lr_after_best_check(self):
+        self._last_lr_decayed = False
+        if self._best_checkpoint_updated:
+            self._epochs_since_best_checkpoint = 0
+            return
+        self._epochs_since_best_checkpoint += 1
+        if self.lr_decay_patience <= 0:
+            return
+        if self._epochs_since_best_checkpoint < self.lr_decay_patience:
+            return
+
+        current_lr = self._get_optimizer_lr()
+        if current_lr is None:
+            return
+        new_lr = max(current_lr * self.lr_decay_factor, self.lr_decay_min)
+        if new_lr >= current_lr:
+            self._epochs_since_best_checkpoint = 0
+            return
+        self._set_optimizer_lr(new_lr)
+        self._last_lr_decayed = True
+        self._epochs_since_best_checkpoint = 0
+        print(
+            f"Epoch {self.current_epoch}, Learning rate decayed: "
+            f"{current_lr:.8g} -> {new_lr:.8g} "
+            f"(no best checkpoint update for {self.lr_decay_patience} epochs)"
+        )
+
     def _save_best_checkpoint(self, summary):
         score = summary.get('final_score', None)
         if score is None:
-            return
+            return False
         if self.best_score is not None and score <= self.best_score:
-            return
+            return False
 
         self.best_score = score
         self.best_epoch = self.current_epoch
+        self._best_checkpoint_updated = True
         os.makedirs(self.ckpt_save_dir, exist_ok=True)
 
         best_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_best.pkl')
@@ -375,6 +435,7 @@ class DummySystem():
             f"Epoch {self.current_epoch}, Best checkpoint saved: "
             f"{best_path} (score={self.best_score:.4f})"
         )
+        return True
 
     def _should_log_score(self):
         if not self.log_score:
@@ -517,6 +578,7 @@ class DummySystem():
             checkpoint_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
             os.makedirs(self.ckpt_save_dir, exist_ok=True)
             self.model.save(checkpoint_path)
+            self._update_lr_after_best_check()
             self._append_training_log(
                 epoch=epoch,
                 train_summary=train_loss_summary,
