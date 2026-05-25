@@ -1,7 +1,7 @@
 predict_dataset:
   shuffle: False
-  batch_size: 1
-  num_workers: 0
+  batch_size: 16
+  num_workers: 10
   datapath:
     input_dataset_dir: ./test_noisy
     use_prob: False
