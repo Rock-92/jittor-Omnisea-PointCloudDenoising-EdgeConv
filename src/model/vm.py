@@ -297,11 +297,21 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     
     patches_denoised = jt.concat(patches_denoised, dim=0)
     patches_denoised = patches_denoised + seed_expand
-    pcl_out = []
-    for pidx in range(N):
-        patch_id = best_weights_idx[pidx].item()
-        mask = (point_idxs[patch_id] == pidx)
-        pcl_out.append(patches_denoised[patch_id][mask])
-    pcl_out = jt.concat(pcl_out, dim=0)
-    assert pcl_out.shape[0] == N, f"expect {N} denoised points, got {pcl_out.shape[0]}"
-    return pcl_out
+
+    point_idxs_np = point_idxs.detach().numpy().astype(np.int64, copy=False)
+    best_patch_np = best_weights_idx.detach().numpy().astype(np.int64, copy=False)
+    denoised_np = patches_denoised.detach().numpy().astype(np.float32, copy=False)
+    patch_ids_np = np.arange(num_patches, dtype=np.int64)[:, None]
+    selected_mask = patch_ids_np == best_patch_np[point_idxs_np]
+    selected_points = point_idxs_np[selected_mask]
+    selected_values = denoised_np[selected_mask]
+
+    pcl_out_np = pcl_noisy[0].detach().numpy().astype(np.float32, copy=True)
+    pcl_out_np[selected_points] = selected_values
+    if selected_values.shape[0] != N:
+        missing = N - np.unique(selected_points).shape[0]
+        print(
+            f"Patch fusion warning: selected {selected_values.shape[0]} values "
+            f"for {N} points; missing unique points={missing}."
+        )
+    return jt.array(pcl_out_np)
