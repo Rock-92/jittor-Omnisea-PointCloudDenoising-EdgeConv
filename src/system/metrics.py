@@ -120,8 +120,18 @@ def compute_denoising_scores(
     cd_noisy = chamfer_distance(pc_noisy, pc_clean, normalize=True)
     cd_score = metric_to_score(cd_pred, cd_noisy)
 
-    p2s_pred = point_to_surface_distance(pc_pred, mesh_v, mesh_f)
-    p2s_noisy = point_to_surface_distance(pc_noisy, mesh_v, mesh_f)
+    p2s_pred = point_to_surface_distance(
+        pc_pred,
+        mesh_v,
+        mesh_f,
+        normalize_ref_pc=pc_clean,
+    )
+    p2s_noisy = point_to_surface_distance(
+        pc_noisy,
+        mesh_v,
+        mesh_f,
+        normalize_ref_pc=pc_clean,
+    )
     p2s_score = None
     if p2s_pred is not None and p2s_noisy is not None:
         p2s_score = metric_to_score(p2s_pred, p2s_noisy)

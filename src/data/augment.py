@@ -176,6 +176,7 @@ class AugmentPatch(Augment):
         asset.meta['pc_noisy'] = pat_A
         asset.meta['pc_clean'] = pat_B
         asset.meta['pc_mix'] = pat_t
+        asset.meta['patch_seed'] = seed_points_t
 
 def get_augments(*args) -> List[Augment]:
     MAP = {

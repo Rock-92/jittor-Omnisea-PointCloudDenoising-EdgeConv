@@ -8,7 +8,8 @@ components:
   model: vm
 
 loss:
-  loss: 1.0
+  displacement_loss: 0.9
+  normalized_surface_loss: 0.1
 
 optimizer:
   __target__: adam
@@ -17,8 +18,9 @@ optimizer:
 trainer:
   epochs: 100
   log_score: True
-  score_every_n_epochs: 10
+  score_every_n_epochs: 1
   score_max_samples: 0
+  training_log_path: outputs/training_log.csv
   create_submission_on_train_end: True
   submission_use_best: True
   submission_source_dir: outputs/submission

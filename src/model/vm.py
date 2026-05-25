@@ -10,7 +10,8 @@ from .spec import ModelSpec
 from ..data.asset import Asset
 
 def get_random_indices(n, m):
-    assert m < n
+    if m is None or m <= 0 or m >= n:
+        return None
     idx = np.random.permutation(n)[:m]
     return jt.array(idx).int32()
 
@@ -41,12 +42,41 @@ class VelocityModule(ModelSpec):
             hidden_size=cfg['decoder_hidden_dim'],
         )
     
-    def get_supervised_loss(self, pc_noisy, pc_mix, pc_clean):
+    def get_normalized_surface_loss(self, pc_pred, pc_clean, pc_anchor):
+        """
+        Point-to-local-plane loss. The plane is estimated from the clean
+        supervision point and its nearest clean neighbors.
+        """
+        dist = ((pc_anchor.unsqueeze(2) - pc_clean.unsqueeze(1)) ** 2.0).sum(dim=-1)
+        _, idx = jt.topk(dist, k=3, dim=-1, largest=False)
+        neighbors = []
+        for b in range(pc_clean.shape[0]):
+            neighbors.append(pc_clean[b][idx[b]])
+        neighbors = jt.stack(neighbors, dim=0)
+
+        p0 = pc_anchor
+        p1 = neighbors[:, :, 1, :]
+        p2 = neighbors[:, :, 2, :]
+        v1 = p1 - p0
+        v2 = p2 - p0
+        normal = jt.stack(
+            [
+                v1[:, :, 1] * v2[:, :, 2] - v1[:, :, 2] * v2[:, :, 1],
+                v1[:, :, 2] * v2[:, :, 0] - v1[:, :, 0] * v2[:, :, 2],
+                v1[:, :, 0] * v2[:, :, 1] - v1[:, :, 1] * v2[:, :, 0],
+            ],
+            dim=-1,
+        )
+        normal = normal / (((normal ** 2.0).sum(dim=-1) + 1e-8) ** 0.5).unsqueeze(-1)
+        plane_dist = (((pc_pred - p0) * normal).sum(dim=-1) ** 2.0)
+        return (plane_dist / self.dsm_sigma).mean()
+
+    def get_supervised_losses(self, pc_noisy, pc_mix, pc_clean):
         """
         pcl_noisy: (B, N, 3)
         pcl_clean: (B, N, 3)
         """
-        B, N_noisy, d = pc_mix.shape
+        B, N_noisy, _ = pc_mix.shape
         
         pnt_idx = get_random_indices(N_noisy, self.num_train_points)
         
@@ -54,23 +84,31 @@ class VelocityModule(ModelSpec):
         feat = self.encoder(pc_mix)  # (B, N, F)
         F_dim = feat.shape[2]
         
-        # gather
-        feat = feat[:, pnt_idx, :]
-        pc_noisy = pc_noisy[:, pnt_idx, :]
-        pc_mix = pc_mix[:, pnt_idx, :]
-        pc_clean = pc_clean[:, pnt_idx, :]
+        pc_noisy_for_loss = pc_noisy
+        pc_clean_for_loss = pc_clean
+        if pnt_idx is not None:
+            feat = feat[:, pnt_idx, :]
+            pc_noisy_for_loss = pc_noisy[:, pnt_idx, :]
+            pc_clean_for_loss = pc_clean[:, pnt_idx, :]
         
         # target
-        grad_dir_t_target = pc_clean - pc_noisy
+        grad_dir_t_target = pc_clean_for_loss - pc_noisy_for_loss
         
         # decoder
         pred_dir = self.decoder(
             c=feat.reshape(-1, F_dim)
-        ).reshape(B, len(pnt_idx), d) # type: ignore
+        ).reshape(B, feat.shape[1], 3) # type: ignore
         
-        loss = (((pred_dir - grad_dir_t_target) ** 2.0) / self.dsm_sigma).sum(dim=-1).mean()
-        
-        return loss
+        displacement_loss = (((pred_dir - grad_dir_t_target) ** 2.0) / self.dsm_sigma).sum(dim=-1).mean()
+        normalized_surface_loss = self.get_normalized_surface_loss(
+            pc_pred=pc_noisy_for_loss + pred_dir,
+            pc_clean=pc_clean,
+            pc_anchor=pc_clean_for_loss,
+        )
+        return {
+            "displacement_loss": displacement_loss,
+            "normalized_surface_loss": normalized_surface_loss,
+        }
 
     def denoise_langevin_dynamics(self, pcl_noisy, num_steps: int=4):
         """
@@ -95,12 +133,11 @@ class VelocityModule(ModelSpec):
         pc_noisy = batch['pc_noisy'].reshape(-1, patch_size, 3)
         pc_mix = batch['pc_mix'].reshape(-1, patch_size, 3)
         pc_clean = batch['pc_clean'].reshape(-1, patch_size, 3)
-        loss = self.get_supervised_loss(
+        return self.get_supervised_losses(
             pc_noisy=pc_noisy,
             pc_mix=pc_mix,
             pc_clean=pc_clean,
         )
-        return {"loss": loss}
     
     def execute(self, **kwargs) -> Dict: # type: ignore
         return self.training_step(**kwargs)
@@ -131,11 +168,14 @@ class VelocityModule(ModelSpec):
         for b in batch:
             if not self.is_predict():
                 assert b.meta is not None
-                res.append({
+                item = {
                     "pc_noisy": b.meta['pc_noisy'], # (num_patches, patch_size, 3)
                     "pc_clean": b.meta['pc_clean'],
                     "pc_mix": b.meta['pc_mix'],
-                })
+                }
+                if "patch_seed" in b.meta:
+                    item["patch_seed"] = b.meta["patch_seed"]
+                res.append(item)
             else:
                 d = {
                     "pc_noisy": b.sampled_vertices_noisy, # (N, 3)

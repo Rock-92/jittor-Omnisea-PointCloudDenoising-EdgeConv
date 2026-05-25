@@ -50,6 +50,18 @@ class NpyLazyAsset(LazyAsset):
         return asset
 
 @dataclass
+class CleanNpyLazyAsset(LazyAsset):
+    # load a cached clean point cloud for training/validation.
+    def load(self) -> 'Asset':
+        pc = np.load(self.path).astype(np.float32)
+        asset = Asset(
+            path=self.path,
+            cls=self.cls,
+            sampled_vertices=pc,
+        )
+        return asset
+
+@dataclass
 class Datapath(ConfigSpec):
     """handle input data paths"""
     
@@ -92,6 +104,7 @@ class Datapath(ConfigSpec):
             None: ObjLazyAsset,
             'obj': ObjLazyAsset,
             'npy': NpyLazyAsset,
+            'clean_npy': CleanNpyLazyAsset,
         }
         input_dataset_dir = kwargs.get('input_dataset_dir', '')
         num_files = kwargs.get('num_files', None)

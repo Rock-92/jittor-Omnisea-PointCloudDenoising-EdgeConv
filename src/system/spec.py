@@ -3,6 +3,7 @@ from jittor import optim
 from typing import Dict, List, Optional
 from tqdm import tqdm
 
+import csv
 import jittor as jt
 import numpy as np
 import os
@@ -11,7 +12,7 @@ import zipfile
 from ..data.asset import Asset
 from ..data.dataset import PCDatasetModule
 from ..model.spec import ModelSpec
-from .metrics import aggregate_denoising_scores, compute_denoising_scores
+from .metrics import aggregate_denoising_scores
 
 def _get_item(x):
     if isinstance(x, jt.Var):
@@ -20,6 +21,8 @@ def _get_item(x):
 
 def _to_jittor(value):
     if isinstance(value, np.ndarray):
+        if np.issubdtype(value.dtype, np.floating):
+            value = value.astype(np.float32, copy=False)
         return jt.array(value)
     if isinstance(value, jt.Var):
         return value
@@ -85,17 +88,23 @@ class DummySystem():
         self.submission_zip_path = trainer_config.get(
             'submission_zip_path', os.path.join('outputs', 'result.zip')
         )
+        self.training_log_path = trainer_config.get(
+            'training_log_path', os.path.join('outputs', 'training_log.csv')
+        )
         
         if optimizer_config is not None and model is not None:
             self.optimizer = get_optimizer(optimizer_config, model)
         else:
             self.optimizer = None
         
+        self._train_loss = defaultdict(list)
         self._validation_loss = defaultdict(list)
         self._validation_scores = []
         self._validation_score_errors = []
         self._validation_score_summary = None
+        self._last_train_loss_dict = {}
         self.best_loss = None
+        self.best_score = None
         self.best_epoch = None
         self.current_epoch = 0
     
@@ -120,6 +129,7 @@ class DummySystem():
                 if self.loss_config[name] > 0:
                     loss_sum += self.loss_config[name] * loss_dict[name]
             loss_dict['loss_sum'] = loss_sum
+            self._last_train_loss_dict = loss_dict.copy()
             # TODO: log
             # # add train prefix to loss_dict
             # prefixed_loss_dict = {f"train/{k}": v for k, v in loss_dict.items()}
@@ -129,7 +139,8 @@ class DummySystem():
         return loss_sum
     
     def on_train_epoch_start(self):
-        pass
+        self._train_loss = defaultdict(list)
+        self._last_train_loss_dict = {}
     
     def on_train_batch_start(self):
         pass
@@ -155,8 +166,21 @@ class DummySystem():
     def validation_step(self, batch):
         assert self.loss_config is not None, "do not have loss_confing"
         loss = self.forward(batch, validate=True)
-        self.validation_score_step(batch)
+        self.record_validation_scores(self.validation_metric_step(batch))
         return loss
+
+    def validation_metric_step(self, batch):
+        return None
+
+    def record_validation_scores(self, metrics):
+        if not self._should_log_score() or metrics is None:
+            return
+        if isinstance(metrics, dict):
+            metrics = [metrics]
+        for metric in metrics:
+            if self.score_max_samples > 0 and len(self._validation_scores) >= self.score_max_samples:
+                return
+            self._validation_scores.append(metric)
     
     def on_validation_batch_end(self):
         pass
@@ -169,7 +193,6 @@ class DummySystem():
                 f"loss_sum={loss_summary['loss_sum']:.8f}, "
                 f"samples={loss_summary['num_samples']}"
             )
-            self._save_best_checkpoint(loss_summary)
 
         if not self._should_log_score():
             return
@@ -177,6 +200,9 @@ class DummySystem():
         if summary is None:
             print(f"Epoch {self.current_epoch}, Validate Score: no valid samples")
             return
+        if loss_summary is not None:
+            summary["loss_sum"] = loss_summary["loss_sum"]
+            summary["loss_num_samples"] = loss_summary["num_samples"]
         self._validation_score_summary = summary
 
         msg = (
@@ -199,12 +225,27 @@ class DummySystem():
                 f"Epoch {self.current_epoch}, Validate Score warnings: "
                 f"{len(self._validation_score_errors)} samples skipped"
             )
+        self._save_best_checkpoint(summary)
     
     def on_before_optimizer_step(self, optimizer):
         pass
 
     def prepare_batch(self, batch):
         return _to_jittor(batch)
+
+    def record_train_losses(self, loss_dict):
+        for name, value in loss_dict.items():
+            self._train_loss[name].append(float(_get_item(value)))
+
+    def _get_train_loss_summary(self):
+        if not self._train_loss:
+            return None
+        summary = {}
+        for name, values in self._train_loss.items():
+            if values:
+                summary[name] = float(np.mean(values))
+        summary["num_batches"] = len(self._train_loss.get("loss_sum", []))
+        return summary
 
     def _get_validation_loss_summary(self):
         losses = []
@@ -213,19 +254,97 @@ class DummySystem():
                 losses.extend(values)
         if not losses:
             return None
-        return {
+        summary = {
             "loss_sum": float(np.mean(losses)),
             "num_samples": len(losses),
         }
+        if self.loss_config is not None:
+            for loss_name in self.loss_config:
+                values = []
+                suffix = f"_{loss_name}"
+                for key, key_values in self._validation_loss.items():
+                    if key.endswith(suffix):
+                        values.extend(key_values)
+                if values:
+                    summary[loss_name] = float(np.mean(values))
+        return summary
+
+    def _training_log_fields(self):
+        loss_names = list(self.loss_config.keys()) if self.loss_config is not None else []
+        return [
+            "epoch",
+            *[f"train_{name}" for name in loss_names],
+            "train_loss_sum",
+            "train_num_batches",
+            *[f"val_{name}" for name in loss_names],
+            "val_loss_sum",
+            "val_num_samples",
+            "final_score",
+            "cd_score",
+            "cd_pred",
+            "cd_noisy",
+            "p2s_score",
+            "p2s_pred",
+            "p2s_noisy",
+            "score_num_samples",
+            "validation_score_errors",
+            "best_epoch",
+            "best_score",
+            "checkpoint_path",
+        ]
+
+    def _append_training_log(self, epoch, train_summary, validation_summary, score_summary, checkpoint_path):
+        row = {field: "" for field in self._training_log_fields()}
+        row["epoch"] = epoch
+        if train_summary is not None:
+            for name, value in train_summary.items():
+                if name == "num_batches":
+                    row["train_num_batches"] = value
+                else:
+                    row[f"train_{name}"] = value
+        if validation_summary is not None:
+            for name, value in validation_summary.items():
+                if name == "num_samples":
+                    row["val_num_samples"] = value
+                else:
+                    row[f"val_{name}"] = value
+        if score_summary is not None:
+            for name in [
+                "final_score",
+                "cd_score",
+                "cd_pred",
+                "cd_noisy",
+                "p2s_score",
+                "p2s_pred",
+                "p2s_noisy",
+            ]:
+                value = score_summary.get(name, None)
+                if value is not None:
+                    row[name] = value
+            row["score_num_samples"] = score_summary.get("num_samples", "")
+        row["validation_score_errors"] = len(self._validation_score_errors)
+        row["best_epoch"] = "" if self.best_epoch is None else self.best_epoch
+        row["best_score"] = "" if self.best_score is None else self.best_score
+        row["checkpoint_path"] = checkpoint_path
+
+        log_path = os.path.abspath(self.training_log_path)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        file_exists = os.path.exists(log_path) and os.path.getsize(log_path) > 0
+        with open(log_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self._training_log_fields())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        print(f"Epoch {epoch}, Training log updated: {log_path}")
 
     def _save_best_checkpoint(self, summary):
-        loss = summary.get('loss_sum', None)
-        if loss is None:
+        score = summary.get('final_score', None)
+        if score is None:
             return
-        if self.best_loss is not None and loss >= self.best_loss:
+        if self.best_score is not None and score <= self.best_score:
             return
 
-        self.best_loss = loss
+        self.best_score = score
         self.best_epoch = self.current_epoch
         os.makedirs(self.ckpt_save_dir, exist_ok=True)
 
@@ -235,15 +354,26 @@ class DummySystem():
         meta_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_best.txt')
         with open(meta_path, "w", encoding="utf-8") as f:
             f.write(f"best_epoch: {self.best_epoch}\n")
-            f.write(f"best_loss: {self.best_loss:.8f}\n")
-            for key in ["loss_sum", "num_samples"]:
+            f.write(f"best_score: {self.best_score:.8f}\n")
+            for key in [
+                "final_score",
+                "cd_score",
+                "cd_pred",
+                "cd_noisy",
+                "p2s_score",
+                "p2s_pred",
+                "p2s_noisy",
+                "num_samples",
+                "loss_sum",
+                "loss_num_samples",
+            ]:
                 value = summary.get(key, None)
                 if value is not None:
                     f.write(f"{key}: {value}\n")
 
         print(
             f"Epoch {self.current_epoch}, Best checkpoint saved: "
-            f"{best_path} (loss={self.best_loss:.8f})"
+            f"{best_path} (score={self.best_score:.4f})"
         )
 
     def _should_log_score(self):
@@ -253,48 +383,6 @@ class DummySystem():
             return False
         return (self.current_epoch + 1) % self.score_every_n_epochs == 0
 
-    def _get_normalized_mesh(self, asset: Asset):
-        if asset.vertices is None or asset.faces is None:
-            return None, None
-        meta = asset.meta or {}
-        center = meta.get('normalize_center', None)
-        scale = meta.get('normalize_scale', None)
-        if center is None or scale is None or scale < 1e-12:
-            return asset.vertices, asset.faces
-        vertices = (asset.vertices - center) / scale
-        return vertices, asset.faces
-
-    @jt.no_grad()
-    def validation_score_step(self, batch):
-        if not self._should_log_score():
-            return
-        if self.score_max_samples > 0 and len(self._validation_scores) >= self.score_max_samples:
-            return
-
-        assets: List[Asset] = batch.get('asset', [])
-        for asset in assets:
-            if self.score_max_samples > 0 and len(self._validation_scores) >= self.score_max_samples:
-                return
-            if asset.sampled_vertices is None or asset.sampled_vertices_noisy is None:
-                self._validation_score_errors.append("missing point cloud")
-                continue
-            try:
-                pc_noisy = asset.sampled_vertices_noisy.astype(np.float32)
-                pred = self.model.predict_step({"pc_noisy": jt.array(pc_noisy[None, ...])})
-                pc_pred = pred[0]["pc_denoised"]
-                mesh_v, mesh_f = self._get_normalized_mesh(asset)
-                score = compute_denoising_scores(
-                    pc_pred=pc_pred,
-                    pc_noisy=asset.sampled_vertices_noisy,
-                    pc_clean=asset.sampled_vertices,
-                    mesh_v=mesh_v,
-                    mesh_f=mesh_f,
-                )
-                self._validation_scores.append(score)
-            except Exception as e:
-                path = asset.path or "<unknown>"
-                self._validation_score_errors.append(f"{path}: {e}")
-    
     def on_predict_epoch_start(self):
         pass
     
@@ -391,6 +479,7 @@ class DummySystem():
                 batch = self.prepare_batch(batch)
                 self.on_train_batch_start()
                 loss = self.training_step(batch)
+                self.record_train_losses(self._last_train_loss_dict)
                 self.optimizer.zero_grad()
                 self.optimizer.backward(loss)
                 pbar.set_description(f"Epoch {epoch}, Loss: {_get_item(loss)}")
@@ -398,8 +487,10 @@ class DummySystem():
                 self.optimizer.step()
                 self.on_train_batch_end()
             self.on_train_epoch_end()
+            train_loss_summary = self._get_train_loss_summary()
             
             self.model.eval()
+            validation_loss_summary = None
             validate_dataloader = self.dataset_module.validate_dataloader()
             if validate_dataloader is not None:
                 self.on_validation_epoch_start()
@@ -421,10 +512,18 @@ class DummySystem():
                         pbar.set_description(f"Epoch {epoch}, Validate, Loss: {_get_item(loss)}")
                         self.on_validation_batch_end()
                 self.on_validation_epoch_end()
+                validation_loss_summary = self._get_validation_loss_summary()
             
             checkpoint_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
             os.makedirs(self.ckpt_save_dir, exist_ok=True)
             self.model.save(checkpoint_path)
+            self._append_training_log(
+                epoch=epoch,
+                train_summary=train_loss_summary,
+                validation_summary=validation_loss_summary,
+                score_summary=self._validation_score_summary,
+                checkpoint_path=checkpoint_path,
+            )
         self.on_train_end()
     
     def predict(self):
